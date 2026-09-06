@@ -9,11 +9,92 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 )
 
-// EvidencePackage is the bounded, collector-produced JSON supplied to an
-// evaluator. It must contain only evidence the evaluator may rely on.
-type EvidencePackage json.RawMessage
+type ContextStatus string
+
+const (
+	ContextComplete   ContextStatus = "COMPLETE"
+	ContextIncomplete ContextStatus = "INCOMPLETE"
+)
+
+const (
+	maxRequirements       = 50
+	maxChangedFiles       = 100
+	maxStructuralEvidence = 100
+	maxGraphEvidence      = 100
+	maxTestEvidence       = 100
+	maxPromptTextRunes    = 600
+	maxPromptPathRunes    = 240
+	redactedIntentText    = "[REDACTED INTENT]"
+)
+
+// SanitizedText is text that will be redacted and bounded before it can be
+// serialized into an evaluator prompt.
+type SanitizedText string
+
+// SanitizedPath is a changed file path, not file content or a patch.
+type SanitizedPath string
+
+type ContextEvidence struct {
+	Status ContextStatus `json:"status"`
+	Note   SanitizedText `json:"note,omitempty"`
+}
+
+type AtomicRequirement struct {
+	ID             string        `json:"id"`
+	Requirement    SanitizedText `json:"requirement"`
+	IntentRedacted bool          `json:"intent_redacted,omitempty"`
+}
+
+type ChangedFileEvidence struct {
+	Path SanitizedPath `json:"path"`
+}
+
+type StructuralEvidence struct {
+	RequirementID string        `json:"requirement_id,omitempty"`
+	Kind          SanitizedText `json:"kind"`
+	Path          SanitizedPath `json:"path,omitempty"`
+	Symbol        SanitizedText `json:"symbol,omitempty"`
+	Observation   SanitizedText `json:"observation"`
+}
+
+type GraphEvidence struct {
+	RequirementID string        `json:"requirement_id,omitempty"`
+	Source        SanitizedText `json:"source"`
+	Relation      SanitizedText `json:"relation"`
+	Target        SanitizedText `json:"target"`
+	Path          SanitizedPath `json:"path,omitempty"`
+}
+
+type TestEvidence struct {
+	RequirementID string        `json:"requirement_id,omitempty"`
+	Name          SanitizedText `json:"name"`
+	Result        SanitizedText `json:"result"`
+	Command       SanitizedText `json:"command,omitempty"`
+	Summary       SanitizedText `json:"summary,omitempty"`
+	Provenance    SanitizedText `json:"provenance"`
+}
+
+// EvidencePackage is the bounded, collector-produced contract supplied to an
+// evaluator. It has no fields for raw checkpoint text, transcripts, session
+// logs, arbitrary JSON, raw checkpoint content, or Git patches.
+type EvidencePackage struct {
+	Context            ContextEvidence       `json:"context"`
+	Requirements       []AtomicRequirement   `json:"requirements"`
+	ChangedFiles       []ChangedFileEvidence `json:"changed_files,omitempty"`
+	StructuralEvidence []StructuralEvidence  `json:"structural_evidence,omitempty"`
+	GraphEvidence      []GraphEvidence       `json:"graph_evidence,omitempty"`
+	TestEvidence       []TestEvidence        `json:"test_evidence,omitempty"`
+}
+
+var (
+	secretAssignmentPattern = regexp.MustCompile(`(?i)\b([a-z0-9_.-]*(?:secret|token|api[_-]?key|password)[a-z0-9_.-]*)\s*[:=]\s*("[^"]*"|'[^']*'|[^,\s]+)`)
+	secretValuePattern      = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9_-]{8,}|gh[pousr]_[a-z0-9_]{8,}|AIza[0-9a-z_-]{10,})\b`)
+	whitespacePattern       = regexp.MustCompile(`\s+`)
+)
 
 // Evaluator converts a collected evidence package into validated audit JSON.
 type Evaluator interface {
@@ -39,8 +120,11 @@ func NewGeminiEvaluator(transport GeminiTransport) *GeminiEvaluator {
 }
 
 func (e *GeminiEvaluator) Evaluate(ctx context.Context, evidence EvidencePackage) (json.RawMessage, error) {
-	if !json.Valid(evidence) {
-		return nil, errors.New("IntentLens evidence package must be valid JSON")
+	if err := evidence.validate(); err != nil {
+		return nil, err
+	}
+	if evidence.needsConservativeAudit() {
+		return evidence.conservativeAuditJSON()
 	}
 	apiKey := os.Getenv("GEMINI_API_KEY")
 	if apiKey == "" {
@@ -63,6 +147,356 @@ func (e *GeminiEvaluator) Evaluate(ctx context.Context, evidence EvidencePackage
 		return nil, fmt.Errorf("encode validated audit: %w", err)
 	}
 	return validated, nil
+}
+
+func (e EvidencePackage) validate() error {
+	switch e.Context.Status {
+	case ContextComplete, ContextIncomplete:
+	default:
+		return fmt.Errorf("sanitized evidence context status must be %s or %s", ContextComplete, ContextIncomplete)
+	}
+	if len(e.Requirements) == 0 {
+		return errors.New("sanitized evidence package requires at least one atomic requirement")
+	}
+	if err := validateMax("requirements", len(e.Requirements), maxRequirements); err != nil {
+		return err
+	}
+	if err := validateMax("changed files", len(e.ChangedFiles), maxChangedFiles); err != nil {
+		return err
+	}
+	if err := validateMax("structural evidence", len(e.StructuralEvidence), maxStructuralEvidence); err != nil {
+		return err
+	}
+	if err := validateMax("graph evidence", len(e.GraphEvidence), maxGraphEvidence); err != nil {
+		return err
+	}
+	if err := validateMax("test evidence", len(e.TestEvidence), maxTestEvidence); err != nil {
+		return err
+	}
+
+	seen := make(map[string]struct{}, len(e.Requirements))
+	for i, requirement := range e.Requirements {
+		label := fmt.Sprintf("requirements[%d]", i)
+		if !requirementID.MatchString(requirement.ID) {
+			return fmt.Errorf("%s.id must match R1, R2, ...", label)
+		}
+		if _, ok := seen[requirement.ID]; ok {
+			return fmt.Errorf("requirement ID %q is duplicated", requirement.ID)
+		}
+		seen[requirement.ID] = struct{}{}
+		if !requirement.IntentRedacted && strings.TrimSpace(sanitizeText(string(requirement.Requirement))) == "" {
+			return fmt.Errorf("%s.requirement must not be empty", label)
+		}
+	}
+	for i, file := range e.ChangedFiles {
+		if strings.TrimSpace(sanitizePath(string(file.Path))) == "" {
+			return fmt.Errorf("changed_files[%d].path must not be empty", i)
+		}
+	}
+	for i, item := range e.StructuralEvidence {
+		if strings.TrimSpace(sanitizeText(string(item.Kind))) == "" {
+			return fmt.Errorf("structural_evidence[%d].kind must not be empty", i)
+		}
+		if strings.TrimSpace(sanitizeText(string(item.Observation))) == "" {
+			return fmt.Errorf("structural_evidence[%d].observation must not be empty", i)
+		}
+		if item.RequirementID != "" && !requirementID.MatchString(item.RequirementID) {
+			return fmt.Errorf("structural_evidence[%d].requirement_id must match R1, R2, ...", i)
+		}
+	}
+	for i, item := range e.GraphEvidence {
+		if strings.TrimSpace(sanitizeText(string(item.Source))) == "" {
+			return fmt.Errorf("graph_evidence[%d].source must not be empty", i)
+		}
+		if strings.TrimSpace(sanitizeText(string(item.Relation))) == "" {
+			return fmt.Errorf("graph_evidence[%d].relation must not be empty", i)
+		}
+		if strings.TrimSpace(sanitizeText(string(item.Target))) == "" {
+			return fmt.Errorf("graph_evidence[%d].target must not be empty", i)
+		}
+		if item.RequirementID != "" && !requirementID.MatchString(item.RequirementID) {
+			return fmt.Errorf("graph_evidence[%d].requirement_id must match R1, R2, ...", i)
+		}
+	}
+	for i, item := range e.TestEvidence {
+		if strings.TrimSpace(sanitizeText(string(item.Name))) == "" {
+			return fmt.Errorf("test_evidence[%d].name must not be empty", i)
+		}
+		if strings.TrimSpace(sanitizeText(string(item.Result))) == "" {
+			return fmt.Errorf("test_evidence[%d].result must not be empty", i)
+		}
+		if strings.TrimSpace(sanitizeText(string(item.Provenance))) == "" {
+			return fmt.Errorf("test_evidence[%d].provenance must not be empty", i)
+		}
+		if item.RequirementID != "" && !requirementID.MatchString(item.RequirementID) {
+			return fmt.Errorf("test_evidence[%d].requirement_id must match R1, R2, ...", i)
+		}
+	}
+	return nil
+}
+
+func validateMax(label string, got, max int) error {
+	if got > max {
+		return fmt.Errorf("%s exceeds evaluator bound: got %d, max %d", label, got, max)
+	}
+	return nil
+}
+
+func (e EvidencePackage) needsConservativeAudit() bool {
+	if e.Context.Status == ContextIncomplete {
+		return true
+	}
+	for _, requirement := range e.Requirements {
+		if requirement.IntentRedacted {
+			return true
+		}
+	}
+	return false
+}
+
+func (e EvidencePackage) conservativeAuditJSON() (json.RawMessage, error) {
+	reason := "Sanitized context is INCOMPLETE or requirement intent is redacted, so implementation cannot be established."
+	reference := "context:" + string(e.Context.Status)
+	if e.hasRedactedIntent() {
+		reference += ";intent:redacted"
+	}
+	audit := Audit{
+		Summary:      "IntentLens cannot mark requirements implemented because sanitized context is incomplete or intent was redacted.",
+		Requirements: make([]Requirement, 0, len(e.Requirements)),
+	}
+	for _, requirement := range e.Requirements {
+		text := sanitizeText(string(requirement.Requirement))
+		if requirement.IntentRedacted || strings.TrimSpace(text) == "" {
+			text = redactedIntentText
+		}
+		audit.Requirements = append(audit.Requirements, Requirement{
+			ID:          requirement.ID,
+			Requirement: text,
+			Status:      StatusUncertain,
+			Confidence:  0.1,
+			Evidence: []Evidence{{
+				Type:        EvidenceCheckpoint,
+				Reference:   reference,
+				Explanation: reason,
+			}},
+			Recommendation: "Run the audit with complete sanitized context and non-redacted requirements before evaluating implementation.",
+		})
+	}
+	data, err := json.Marshal(audit)
+	if err != nil {
+		return nil, fmt.Errorf("encode conservative audit: %w", err)
+	}
+	if _, err := ParseAuditJSON(data); err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
+}
+
+func (e EvidencePackage) hasRedactedIntent() bool {
+	for _, requirement := range e.Requirements {
+		if requirement.IntentRedacted {
+			return true
+		}
+	}
+	return false
+}
+
+func (e EvidencePackage) sanitizedJSON() ([]byte, error) {
+	if err := e.validate(); err != nil {
+		return nil, err
+	}
+	type promptContext struct {
+		Status ContextStatus `json:"status"`
+		Note   string        `json:"note,omitempty"`
+	}
+	type promptRequirement struct {
+		ID             string `json:"id"`
+		Requirement    string `json:"requirement"`
+		IntentRedacted bool   `json:"intent_redacted,omitempty"`
+	}
+	type promptChangedFile struct {
+		Path string `json:"path"`
+	}
+	type promptStructuralEvidence struct {
+		RequirementID string `json:"requirement_id,omitempty"`
+		Kind          string `json:"kind"`
+		Path          string `json:"path,omitempty"`
+		Symbol        string `json:"symbol,omitempty"`
+		Observation   string `json:"observation"`
+	}
+	type promptGraphEvidence struct {
+		RequirementID string `json:"requirement_id,omitempty"`
+		Source        string `json:"source"`
+		Relation      string `json:"relation"`
+		Target        string `json:"target"`
+		Path          string `json:"path,omitempty"`
+	}
+	type promptTestEvidence struct {
+		RequirementID string `json:"requirement_id,omitempty"`
+		Name          string `json:"name"`
+		Result        string `json:"result"`
+		Command       string `json:"command,omitempty"`
+		Summary       string `json:"summary,omitempty"`
+		Provenance    string `json:"provenance"`
+	}
+	payload := struct {
+		Context            promptContext              `json:"context"`
+		Requirements       []promptRequirement        `json:"requirements"`
+		ChangedFiles       []promptChangedFile        `json:"changed_files,omitempty"`
+		StructuralEvidence []promptStructuralEvidence `json:"structural_evidence,omitempty"`
+		GraphEvidence      []promptGraphEvidence      `json:"graph_evidence,omitempty"`
+		TestEvidence       []promptTestEvidence       `json:"test_evidence,omitempty"`
+	}{
+		Context: promptContext{
+			Status: e.Context.Status,
+			Note:   sanitizeText(string(e.Context.Note)),
+		},
+		Requirements: make([]promptRequirement, 0, len(e.Requirements)),
+	}
+	for _, requirement := range e.Requirements {
+		text := sanitizeText(string(requirement.Requirement))
+		if requirement.IntentRedacted {
+			text = redactedIntentText
+		}
+		payload.Requirements = append(payload.Requirements, promptRequirement{
+			ID:             requirement.ID,
+			Requirement:    text,
+			IntentRedacted: requirement.IntentRedacted,
+		})
+	}
+	for _, file := range e.ChangedFiles {
+		payload.ChangedFiles = append(payload.ChangedFiles, promptChangedFile{Path: sanitizePath(string(file.Path))})
+	}
+	for _, item := range e.StructuralEvidence {
+		payload.StructuralEvidence = append(payload.StructuralEvidence, promptStructuralEvidence{
+			RequirementID: item.RequirementID,
+			Kind:          sanitizeText(string(item.Kind)),
+			Path:          sanitizePath(string(item.Path)),
+			Symbol:        sanitizeText(string(item.Symbol)),
+			Observation:   sanitizeText(string(item.Observation)),
+		})
+	}
+	for _, item := range e.GraphEvidence {
+		payload.GraphEvidence = append(payload.GraphEvidence, promptGraphEvidence{
+			RequirementID: item.RequirementID,
+			Source:        sanitizeText(string(item.Source)),
+			Relation:      sanitizeText(string(item.Relation)),
+			Target:        sanitizeText(string(item.Target)),
+			Path:          sanitizePath(string(item.Path)),
+		})
+	}
+	for _, item := range e.TestEvidence {
+		payload.TestEvidence = append(payload.TestEvidence, promptTestEvidence{
+			RequirementID: item.RequirementID,
+			Name:          sanitizeText(string(item.Name)),
+			Result:        sanitizeText(string(item.Result)),
+			Command:       sanitizeText(string(item.Command)),
+			Summary:       sanitizeText(string(item.Summary)),
+			Provenance:    sanitizeText(string(item.Provenance)),
+		})
+	}
+	return json.Marshal(payload)
+}
+
+func sanitizedEvidenceForPrompt(evidence EvidencePackage) string {
+	data, err := evidence.sanitizedJSON()
+	if err == nil {
+		return string(data)
+	}
+	fallback, marshalErr := json.Marshal(struct {
+		ContractError string `json:"contract_error"`
+	}{ContractError: sanitizeText(err.Error())})
+	if marshalErr != nil {
+		return `{"contract_error":"invalid sanitized evidence contract"}`
+	}
+	return string(fallback)
+}
+
+func sanitizeText(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	value = strings.ReplaceAll(value, "\x00", "")
+	value = secretAssignmentPattern.ReplaceAllString(value, "${1}=[REDACTED]")
+	value = secretValuePattern.ReplaceAllString(value, "[REDACTED_SECRET]")
+
+	lines := strings.Split(value, "\n")
+	kept := make([]string, 0, len(lines))
+	redacted := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if unsafePromptLine(trimmed) {
+			redacted = true
+			continue
+		}
+		kept = append(kept, trimmed)
+	}
+	if redacted {
+		kept = append(kept, "[REDACTED UNSAFE CONTENT]")
+	}
+	result := strings.TrimSpace(whitespacePattern.ReplaceAllString(strings.Join(kept, " "), " "))
+	if result == "" && redacted {
+		result = "[REDACTED UNSAFE CONTENT]"
+	}
+	return truncateRunes(result, maxPromptTextRunes)
+}
+
+func sanitizePath(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	value = strings.ReplaceAll(value, "\x00", "")
+	value = strings.TrimSpace(value)
+	if i := strings.IndexByte(value, '\n'); i >= 0 {
+		value = strings.TrimSpace(value[:i])
+	}
+	if value == "" {
+		return ""
+	}
+	if unsafePromptLine(value) {
+		return "[REDACTED_PATH]"
+	}
+	return truncateRunes(value, maxPromptPathRunes)
+}
+
+func unsafePromptLine(value string) bool {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	switch {
+	case strings.Contains(lower, "begin transcript"),
+		strings.Contains(lower, "end transcript"),
+		strings.Contains(lower, "session log"),
+		strings.Contains(lower, "checkpoint prompt"),
+		strings.Contains(lower, "raw checkpoint"):
+		return true
+	case strings.HasPrefix(lower, "user:"),
+		strings.HasPrefix(lower, "assistant:"),
+		strings.HasPrefix(lower, "system:"),
+		strings.HasPrefix(lower, "tool:"):
+		return true
+	case strings.HasPrefix(value, "diff --git "),
+		strings.HasPrefix(value, "@@ "),
+		strings.HasPrefix(value, "index "),
+		strings.HasPrefix(value, "+++ "),
+		strings.HasPrefix(value, "--- "):
+		return true
+	case len(value) > 1 && (value[0] == '+' || value[0] == '-'):
+		return true
+	case strings.HasPrefix(value, "{") && strings.Contains(value, "\":"):
+		return true
+	case strings.HasPrefix(value, "[") && strings.Contains(value, "{"):
+		return true
+	default:
+		return false
+	}
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + " [truncated]"
 }
 
 func extractGeminiAuditJSON(response []byte) ([]byte, error) {
