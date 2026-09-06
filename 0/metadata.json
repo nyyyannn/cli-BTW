@@ -1,0 +1,60 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M1TZY3SZXXYGZPJQZCZEYQJS",
+  "session_id": "01a07588-ee8b-7741-88a3-2b57c5e74a77",
+  "strategy": "manual-commit",
+  "created_at": "2026-09-06T09:14:10.317054Z",
+  "branch": "integration-audit",
+  "checkpoints_count": 2,
+  "save_step_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint_audit.go",
+    "cmd/entire/cli/checkpoint_audit_test.go",
+    "cmd/entire/cli/review/intentlens/evaluator.go",
+    "cmd/entire/cli/review/intentlens/view.go"
+  ],
+  "agent": "Codex",
+  "model": "gpt-5.5",
+  "turn_id": "52493c48773b",
+  "checkpoint_transcript_start": 225,
+  "transcript_lines_at_start": 225,
+  "compact_transcript_start": 22,
+  "token_usage": {
+    "input_tokens": 105775,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 2303744,
+    "output_tokens": 23544,
+    "api_call_count": 27
+  },
+  "session_metrics": {
+    "turn_count": 4
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-09-06T09:14:10.274879Z",
+    "agent_lines": 526,
+    "agent_removed": 36,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 526,
+    "total_lines_changed": 562,
+    "agent_percentage": 100,
+    "metric_version": 2
+  },
+  "prompt_attributions": [
+    {
+      "checkpoint_number": 1,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 0,
+      "agent_lines_removed": 0
+    },
+    {
+      "checkpoint_number": 2,
+      "user_lines_added": 0,
+      "user_lines_removed": 0,
+      "agent_lines_added": 515,
+      "agent_lines_removed": 36
+    }
+  ]
+}

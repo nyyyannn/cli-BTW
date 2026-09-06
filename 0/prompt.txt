@@ -1,0 +1,44 @@
+Work only on branch `integration-audit`. Keep this focused; inspect only the checkpoint audit command/collector boundary, IntentLens evaluator, renderer, and their tests. Do not scan/refactor unrelated code, write docs, create a backend, or make real Gemini calls.
+
+Make the final product work:
+
+`entire checkpoint audit <checkpoint-id>`
+
+Currently it only collects evidence. Wire the existing real collector output into the existing **typed sanitized** evaluator input, then invoke the existing evaluator, validate its structured audit, and render a compact neofetch-style terminal dashboard.
+
+Default terminal output must show only data actually available:
+
+* IntentLens title
+* checkpoint ID and context status
+* overall summary and confidence when supplied
+* counts of IMPLEMENTED / INCOMPLETE / UNCERTAIN
+* compact list of all requirements: ID, status, confidence, short text
+* top actionable recommendations
+
+Do not display invented token counts, metadata, confidence, or evidence. If context is incomplete/redacted, visibly show that and keep findings conservative.
+
+Add `--requirement R#` to show full evidence and recommendation for only one requirement. Preserve `--json` as validated final audit JSON.
+
+No demo/synthetic fallback in `entire checkpoint audit`. Missing `GEMINI_API_KEY` must return a clear error. Keep credentials runtime-only and unlogged. Preserve the sanitized privacy boundary; raw prompts/transcripts/logs/patches must never reach Gemini.
+
+Use fake transport tests only. Add/update focused tests for command wiring, JSON output, requirement filtering, incomplete-context behavior, and missing-key error. Run gofmt and:
+
+`go test ./cmd/entire/cli/checkpoint/... ./cmd/entire/cli/review/...`
+
+Show changed files, test output, and any genuine blocker. Stop; do not commit.
+ and dont use dummy data for showing when I ask please
+
+---
+
+Fix only the three failing tests from the last run. Do not inspect unrelated files or refactor.
+
+1. Make dashboard assertions robust to harmless alignment whitespace: assert the label/value content for `summary` and `findings`, not one exact number of spaces.
+2. The privacy test must use a unique sensitive-data sentinel such as `SECRET_TRANSCRIPT_9f1c2d`; assert that sentinel is absent from the Gemini request. Do not fail merely because the static safety instructions contain generic words like “raw checkpoint”.
+3. Keep the actual sanitized contract and safety prompt unchanged unless a genuine raw payload leak exists.
+
+Run only:
+`go test -count=1 ./cmd/entire/cli -run 'Test.*CheckpointAudit|Test.*Audit'`
+and
+`go test -count=1 ./cmd/entire/cli/review/intentlens/...`
+
+Show the test output and stop. Do not commit.
