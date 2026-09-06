@@ -1,0 +1,16 @@
+Work only on `audit-ui`. Spend tokens only on `cmd/entire/cli/review/intentlens/evaluator.go`, `prompts.go`, and focused tests. Do not make a plan or scan unrelated files.
+
+Replace evaluator-facing `EvidencePackage` uses of `json.RawMessage` with a typed sanitized contract. `GeminiEvaluator` and `CheckpointAuditPrompt` must accept/serialize only this contract.
+
+Structurally prevent raw checkpoint prompts, transcripts, session logs, arbitrary JSON, raw checkpoint content, and raw Git patches from reaching Gemini. Permit only sanitized atomic requirements, `COMPLETE`/`INCOMPLETE` context status, changed file paths, bounded structural/Graph evidence, and test evidence with provenance.
+
+If context is `INCOMPLETE` or intent is redacted, return conservative `UNCERTAIN` with low confidence; never `IMPLEMENTED`. Keep existing statuses only—do not add `SUPPORTED` or `UNVERIFIABLE`.
+
+Do not modify `checkpoint_audit.go`, any evidence collector, command registration, UI, docs, or demo commands. Use fake transport only; no real Gemini call.
+
+Add four focused tests: sanitized request succeeds; incomplete context is explicit; inserted secret/transcript text is absent from the Gemini request; incomplete intent cannot yield a confident implemented result.
+
+Run gofmt and:
+`go test ./cmd/entire/cli/review/intentlens/...`
+
+Show changed files and test result, then stop. Do not commit.
