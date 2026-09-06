@@ -1,0 +1,99 @@
+Your job is to modify checkpoint_audit.go so that:
+
+entire checkpoint audit <checkpoint-id>
+
+eventually becomes:
+
+Checkpoint
+    ↓
+SAFE evidence collector
+    ↓
+Graph with SAFE requirements
+    ↓
+Gemini evaluator
+    ↓
+findings
+
+But do not start ripping apart your command before Narendra has his API shape.
+
+Your first job is to tell Codex:
+
+We have approximately 20 minutes.
+
+You are on branch nayan-audit.
+
+Do NOT make broad refactors.
+
+The goal is to make:
+
+entire checkpoint audit <checkpoint-id>
+
+work end-to-end while satisfying the Privacy Boundary curveball.
+
+Current command already:
+- resolves checkpoint
+- reads checkpoint/session
+- builds IntentPacket
+- collects Git evidence
+- performs Entire Graph search
+- outputs AuditReport
+
+Current problems:
+- raw prompts are exposed in IntentPacket/output
+- raw prompts are currently used as Graph query
+- raw transcript is unnecessarily loaded
+- findings are empty because evaluator is not connected
+
+DO NOT send raw Checkpoint prompts or transcript to Gemini
+or any external service.
+
+The architecture must become:
+
+Checkpoint
+ -> LOCAL raw data processing
+ -> sanitized/typed evidence
+ -> Graph using sanitized requirements only
+ -> Gemini evaluator using ONLY sanitized evidence
+ -> Audit findings
+
+First inspect the current code and the evidence/evaluator
+interfaces after the teammate branches are merged locally.
+
+Use Entire Graph impact/relationship analysis before editing
+because this is a privacy-boundary change.
+
+Then implement the MINIMUM required orchestration.
+
+Requirements:
+
+1. Do not fetch raw transcript if it is not needed.
+2. Raw prompts/transcript must remain local.
+3. Do not put raw prompts into the final evaluator package.
+4. Do not use raw prompts as the Graph query.
+5. Use sanitized requirements for Graph.
+6. Preserve COMPLETE/INCOMPLETE context.
+7. Connect the sanitized evidence package to Gemini.
+8. Produce actual findings.
+9. If context is INCOMPLETE, surface that clearly and
+   prevent authoritative conclusions.
+10. Preserve existing checkpoint resolution.
+
+Do NOT implement UI.
+Do NOT refactor unrelated code.
+Do NOT modify storage internals.
+
+First report the affected files/functions from Graph,
+then implement.
+
+Run gofmt.
+Run focused tests.
+Build the CLI.
+
+The final command must be:
+
+entire checkpoint audit <checkpoint-id>
+
+---
+
+git diff --check passes. I attempted gofmt, focused tests, and CLI build, but this environment has neither go nor
+  gofmt on PATH, so those could not run. go ahead and install them on the path or wherever.
