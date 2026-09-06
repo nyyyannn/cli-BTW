@@ -1,14 +1,3 @@
-run the ui part and show me this is the api key --  export GEMINI_API_KEY="REDACTED"
-harsha@Harshas-MacBook-Air cli-btw % go run ./cmd/entire checkpoint audit 01M1TRQDTVW1T2KN7VRZGSFN4A
-
----
-
-Run this command once and report only the terminal output. Do not read, print, modify, or log environment variables:
-
-go run ./cmd/entire checkpoint audit 01M1TRQDTVW1T2KN7VRZGSFN4A
-
----
-
 We are testing IntentLens's requirement-level implementation audit.
 
 Implement the following developer request in the repository:
