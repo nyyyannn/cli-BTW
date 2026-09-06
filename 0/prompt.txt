@@ -1,0 +1,5 @@
+go run ./cmd/entire checkpoint audit --help run this command and show me the output of this command.
+
+---
+
+bruh what is this go error again. fix it and this shouldn't come again and then run that command i gave you and then show me the output
