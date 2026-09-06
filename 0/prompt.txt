@@ -1,0 +1,5 @@
+Do not change production code. Read the current IntentLens documentation and Git history. Append a concise “Current handoff status” section to docs/architecture/intentlens-audit.md.
+
+State: audit-ui contains the schema, Gemini evaluator interface, prompts, tests, fixtures, and development-only `entire review audit --demo`. The final production command is `entire checkpoint audit <checkpoint-id>`. Another teammate owns checkpoint command registration and real evidence-collector wiring. Do not claim Gemini is live or that demo data is production evidence.
+
+Show the diff and stop.
