@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.10.5",
+  "checkpoint_id": "01M1V25VPR3F7VR8JCF6KFXWRP",
+  "strategy": "manual-commit",
+  "branch": "test-partial-implementation",
+  "checkpoints_count": 2,
+  "files_touched": [
+    "cmd/entire/cli/checkpoint_audit_test.go"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0/metadata.json",
+      "transcript": "/0/full.jsonl",
+      "compact_transcript": "/0/transcript.jsonl",
+      "content_hash": "/0/content_hash.txt",
+      "prompt": "/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 25447,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 1690624,
+    "output_tokens": 8158,
+    "api_call_count": 16
+  }
+}

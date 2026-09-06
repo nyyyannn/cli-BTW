@@ -1,0 +1,37 @@
+run the ui part and show me this is the api key --  export GEMINI_API_KEY="REDACTED"
+harsha@Harshas-MacBook-Air cli-btw % go run ./cmd/entire checkpoint audit 01M1TRQDTVW1T2KN7VRZGSFN4A
+
+---
+
+Run this command once and report only the terminal output. Do not read, print, modify, or log environment variables:
+
+go run ./cmd/entire checkpoint audit 01M1TRQDTVW1T2KN7VRZGSFN4A
+
+---
+
+We are testing IntentLens's requirement-level implementation audit.
+
+Implement the following developer request in the repository:
+
+1. Add a native CLI command:
+   `entire checkpoint audit <checkpoint-id>`
+
+2. Add a `--json` flag to the audit command that emits the audit report as JSON.
+
+3. Add a `--strict` flag that causes the command to exit with a non-zero status when any requirement is incomplete or uncertain.
+
+IMPORTANT TEST CONDITION:
+Implement requirements 1 and 2 completely.
+
+DO NOT implement requirement 3.
+Do not add --strict, do not add equivalent behavior under another flag, and do not create a workaround that satisfies requirement 3.
+
+Write/update appropriate tests for requirements 1 and 2 only.
+
+Do not modify unrelated functionality.
+
+After making the changes:
+1. Run the relevant tests.
+2. Commit the changes.
+3. Tell me the commit SHA.
+4. Do not mention requirement 3 in the implementation itself.
