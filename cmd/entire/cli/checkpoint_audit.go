@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os/exec"
 	"sort"
 	"strings"
 
 	"github.com/entireio/cli/api/checkpoint"
 	"github.com/entireio/cli/cmd/entire/cli/checkpoint/id"
+	"github.com/entireio/cli/cmd/entire/cli/review/intentlens"
 	"github.com/entireio/cli/cmd/entire/cli/trailers"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing/object"
@@ -64,61 +64,108 @@ type AuditFinding struct {
 // empty until an evaluator is wired in; evidence collection must not invent
 // audit outcomes.
 type AuditReport struct {
-	Intent         IntentPacket            `json:"intent"`
+	Intent         IntentPacket           `json:"intent"`
 	Implementation ImplementationEvidence `json:"implementation"`
-	Findings       []AuditFinding          `json:"findings"`
+	Findings       []AuditFinding         `json:"findings"`
+}
+
+type checkpointAuditCollector func(cmd *cobra.Command, target string, sessionIndex int, testFilter string) (AuditReport, error)
+
+type checkpointAuditDeps struct {
+	collect   checkpointAuditCollector
+	evaluator intentlens.Evaluator
+}
+
+func (deps checkpointAuditDeps) withDefaults() checkpointAuditDeps {
+	if deps.collect == nil {
+		deps.collect = collectCheckpointAuditEvidence
+	}
+	if deps.evaluator == nil {
+		deps.evaluator = intentlens.NewGeminiEvaluator(nil)
+	}
+	return deps
 }
 
 func newCheckpointAuditCmd() *cobra.Command {
+	return newCheckpointAuditCmdWithDeps(checkpointAuditDeps{})
+}
+
+func newCheckpointAuditCmdWithDeps(deps checkpointAuditDeps) *cobra.Command {
 	var jsonOut bool
+	var requirementID string
 	var sessionIndex int
 	var testFilter string
 
 	cmd := &cobra.Command{
-		Use:   "audit <checkpoint-id|commit-sha>",
-		Short: "Collect checkpoint intent and implementation evidence",
+		Use:   "audit <checkpoint-id>",
+		Short: "Audit checkpoint intent against implementation evidence",
 		Long: `Collect the developer intent stored in an Entire checkpoint and the
-Git, test-file, and Entire Graph evidence needed to audit its implementation.
-
-This command only collects normalized evidence. It does not yet evaluate
-claims or call a model.`,
+Git, test-file, and Entire Graph evidence needed to audit its implementation,
+then evaluate a sanitized evidence package with IntentLens.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCheckpointAudit(cmd, args[0], jsonOut, sessionIndex, testFilter)
+			return runCheckpointAudit(cmd, args[0], jsonOut, requirementID, sessionIndex, testFilter, deps.withDefaults())
 		},
 	}
 
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit machine-readable JSON evidence")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Emit validated audit JSON")
+	cmd.Flags().StringVar(&requirementID, "requirement", "", "Show full evidence and recommendation for one requirement ID, such as R2")
 	cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "Collect a specific session within the checkpoint (0-based; default latest)")
 	cmd.Flags().StringVar(&testFilter, "test", "", "Restrict changed test-file evidence to paths containing this text")
 	return cmd
 }
 
-func runCheckpointAudit(cmd *cobra.Command, target string, jsonOut bool, sessionIndex int, testFilter string) error {
+func runCheckpointAudit(cmd *cobra.Command, target string, jsonOut bool, requirementID string, sessionIndex int, testFilter string, deps checkpointAuditDeps) error {
+	report, err := deps.collect(cmd, target, sessionIndex, testFilter)
+	if err != nil {
+		return err
+	}
+	evidence := buildIntentLensEvidencePackage(report)
+	auditJSON, err := deps.evaluator.Evaluate(cmd.Context(), evidence)
+	if err != nil {
+		return err
+	}
+	audit, err := intentlens.ParseAuditJSON(auditJSON)
+	if err != nil {
+		return fmt.Errorf("validate IntentLens audit: %w", err)
+	}
+	if jsonOut {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(audit)
+	}
+	return intentlens.RenderDashboard(cmd.OutOrStdout(), intentlens.DashboardState{
+		Audit:         &audit,
+		CheckpointID:  report.Intent.CheckpointID,
+		ContextStatus: evidence.Context.Status,
+		ContextNote:   string(evidence.Context.Note),
+		RequirementID: requirementID,
+	})
+}
+
+func collectCheckpointAuditEvidence(cmd *cobra.Command, target string, sessionIndex int, testFilter string) (AuditReport, error) {
 	ctx := cmd.Context()
 	cpID, lookup, err := resolveExplainCheckpointID(ctx, cmd.ErrOrStderr(), explainExportOptions{target: target})
 	if err != nil {
-		return fmt.Errorf("resolve checkpoint: %w", err)
+		return AuditReport{}, fmt.Errorf("resolve checkpoint: %w", err)
 	}
 	defer lookup.Close()
 
 	summary, err := checkpoint.ReadCheckpoint(ctx, lookup.store, cpID)
 	if err != nil {
-		return fmt.Errorf("read checkpoint summary: %w", err)
+		return AuditReport{}, fmt.Errorf("read checkpoint summary: %w", err)
 	}
 	index, err := resolveSessionIndex(summary, sessionIndex)
 	if err != nil {
-		return err
+		return AuditReport{}, err
 	}
 	content, err := lookup.store.ReadSessionContent(ctx, cpID, index)
 	if err != nil {
-		return fmt.Errorf("read checkpoint session %d: %w", index, err)
+		return AuditReport{}, fmt.Errorf("read checkpoint session %d: %w", index, err)
 	}
 
 	intent := buildAuditIntent(cpID, summary, content)
 	implementation, err := gatherAuditImplementationEvidence(ctx, lookup.repo, cpID, testFilter)
 	if err != nil {
-		return fmt.Errorf("gather implementation evidence: %w", err)
+		return AuditReport{}, fmt.Errorf("gather implementation evidence: %w", err)
 	}
 	if graphEvidence, graphErr := runEntireGraphSearch(ctx, intent.Prompts); graphErr != nil {
 		implementation.Warnings = append(implementation.Warnings, "Entire Graph evidence unavailable: "+graphErr.Error())
@@ -131,11 +178,7 @@ func runCheckpointAudit(cmd *cobra.Command, target string, jsonOut bool, session
 		Implementation: implementation,
 		Findings:       []AuditFinding{},
 	}
-	if jsonOut {
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
-	}
-	renderCheckpointAuditReport(cmd.OutOrStdout(), report)
-	return nil
+	return report, nil
 }
 
 func buildAuditIntent(cpID id.CheckpointID, summary *checkpoint.CheckpointSummary, content *checkpoint.SessionContent) IntentPacket {
@@ -274,18 +317,61 @@ func runEntireGraphSearch(ctx context.Context, prompts []string) (json.RawMessag
 	return json.RawMessage(encoded), nil
 }
 
-func renderCheckpointAuditReport(w io.Writer, report AuditReport) {
-	fmt.Fprintf(w, "Checkpoint audit evidence: %s\n", report.Intent.CheckpointID)
-	fmt.Fprintf(w, "Session: agent=%s model=%s transcript-start=%d\n", report.Intent.Agent, report.Intent.Model, report.Intent.TranscriptStart)
-	fmt.Fprintf(w, "Prompts: %d  Declared files: %d\n", len(report.Intent.Prompts), len(report.Intent.DeclaredFilesTouched))
-	fmt.Fprintf(w, "Linked commits: %d  Changed files: %d  Changed tests: %d\n", len(report.Implementation.LinkedCommits), len(report.Implementation.ActualFilesTouched), len(report.Implementation.FocusedTests))
-	if len(report.Implementation.Warnings) > 0 {
-		fmt.Fprintln(w, "Warnings:")
-		for _, warning := range report.Implementation.Warnings {
-			fmt.Fprintf(w, "  - %s\n", warning)
-		}
+func buildIntentLensEvidencePackage(report AuditReport) intentlens.EvidencePackage {
+	evidence := intentlens.EvidencePackage{
+		Context: intentlens.ContextEvidence{
+			Status: intentlens.ContextComplete,
+		},
 	}
-	fmt.Fprintln(w, "No audit findings were generated; an evaluation layer has not been configured.")
+	intentIncomplete := false
+	for i, prompt := range report.Intent.Prompts {
+		requirement := intentlens.AtomicRequirementFromText(fmt.Sprintf("R%d", i+1), prompt)
+		if requirement.IntentRedacted {
+			intentIncomplete = true
+		}
+		evidence.Requirements = append(evidence.Requirements, requirement)
+	}
+	if len(evidence.Requirements) == 0 {
+		intentIncomplete = true
+		evidence.Requirements = append(evidence.Requirements, intentlens.AtomicRequirement{
+			ID:             "R1",
+			Requirement:    "[REDACTED INTENT]",
+			IntentRedacted: true,
+		})
+	}
+	if intentIncomplete {
+		evidence.Context.Status = intentlens.ContextIncomplete
+		evidence.Context.Note = "checkpoint intent was missing or redacted before evaluation"
+	}
+
+	for _, file := range sortedUniqueStrings(append(append([]string(nil), report.Intent.DeclaredFilesTouched...), report.Implementation.ActualFilesTouched...)) {
+		evidence.ChangedFiles = append(evidence.ChangedFiles, intentlens.ChangedFileEvidence{Path: intentlens.SanitizedPath(file)})
+	}
+	for _, commit := range report.Implementation.LinkedCommits {
+		evidence.StructuralEvidence = append(evidence.StructuralEvidence, intentlens.StructuralEvidence{
+			Kind:        "linked_commit",
+			Observation: intentlens.SanitizedText("Commit " + commit + " carries the checkpoint trailer."),
+		})
+	}
+	if len(report.Implementation.GraphEvidence) > 0 {
+		evidence.GraphEvidence = append(evidence.GraphEvidence, intentlens.GraphEvidence{
+			Source:   "Entire Graph",
+			Relation: "returned",
+			Target:   "bounded graph evidence available; raw graph output withheld",
+		})
+	}
+	for _, testFile := range report.Implementation.FocusedTests {
+		evidence.TestEvidence = append(evidence.TestEvidence, intentlens.TestEvidence{
+			Name:       intentlens.SanitizedText(testFile),
+			Result:     "not_run",
+			Summary:    "Changed test file path was collected; no test execution result was supplied.",
+			Provenance: "checkpoint audit collector changed test-file evidence",
+		})
+	}
+	if len(report.Implementation.Warnings) > 0 {
+		evidence.Context.Note = intentlens.SanitizedText(strings.Join(report.Implementation.Warnings, "; "))
+	}
+	return evidence
 }
 
 func sortedUniqueStrings(values []string) []string {

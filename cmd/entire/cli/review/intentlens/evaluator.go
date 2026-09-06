@@ -96,6 +96,19 @@ var (
 	whitespacePattern       = regexp.MustCompile(`\s+`)
 )
 
+func AtomicRequirementFromText(id string, requirement string) AtomicRequirement {
+	text, redacted := sanitizeTextWithReport(requirement)
+	if strings.TrimSpace(text) == "" {
+		text = redactedIntentText
+		redacted = true
+	}
+	return AtomicRequirement{
+		ID:             id,
+		Requirement:    SanitizedText(text),
+		IntentRedacted: redacted,
+	}
+}
+
 // Evaluator converts a collected evidence package into validated audit JSON.
 type Evaluator interface {
 	Evaluate(ctx context.Context, evidence EvidencePackage) (json.RawMessage, error)
@@ -413,15 +426,28 @@ func sanitizedEvidenceForPrompt(evidence EvidencePackage) string {
 }
 
 func sanitizeText(value string) string {
+	sanitized, _ := sanitizeTextWithReport(value)
+	return sanitized
+}
+
+func sanitizeTextWithReport(value string) (string, bool) {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
 	value = strings.ReplaceAll(value, "\r", "\n")
 	value = strings.ReplaceAll(value, "\x00", "")
-	value = secretAssignmentPattern.ReplaceAllString(value, "${1}=[REDACTED]")
-	value = secretValuePattern.ReplaceAllString(value, "[REDACTED_SECRET]")
+	redacted := false
+	replaced := secretAssignmentPattern.ReplaceAllString(value, "${1}=[REDACTED]")
+	if replaced != value {
+		redacted = true
+	}
+	value = replaced
+	replaced = secretValuePattern.ReplaceAllString(value, "[REDACTED_SECRET]")
+	if replaced != value {
+		redacted = true
+	}
+	value = replaced
 
 	lines := strings.Split(value, "\n")
 	kept := make([]string, 0, len(lines))
-	redacted := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
@@ -440,7 +466,7 @@ func sanitizeText(value string) string {
 	if result == "" && redacted {
 		result = "[REDACTED UNSAFE CONTENT]"
 	}
-	return truncateRunes(result, maxPromptTextRunes)
+	return truncateRunes(result, maxPromptTextRunes), redacted
 }
 
 func sanitizePath(value string) string {
