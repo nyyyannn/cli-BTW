@@ -1,0 +1,331 @@
+Analyze this repository without modifying files. We are building an E1 Checkpoint-Native Developer Experience. We want to create an intent-audit workflow that uses an Entire Checkpoint as the source of developer intent, then verifies that intent against the implementation using Git, Entire Graph, source code and tests. Identify the existing checkpoint/session data structures and commands, how CLI commands are organized, how extensions/plugins/external commands are implemented, and the cleanest integration point for our feature. Give exact file paths, functions/types, and recommend the smallest viable implementation path.
+
+---
+
+git checkout -b nayan-audit create a branch using this asap and then understand this:
+
+---
+
+We are participating in the BTW Buildathon 2026, E1: Checkpoint-Native Developer Experience.
+
+We are adding a native command to the Entire CLI:
+
+    entire checkpoint audit <checkpoint-id>
+
+The purpose is to audit a developer's original intent captured by an Entire Checkpoint against the resulting implementation.
+
+IMPORTANT:
+- Do not create a separate application.
+- Do not create an Express server.
+- This must be a native Go/Cobra CLI feature inside this repository.
+- Follow the existing repository architecture and coding conventions.
+- Do not invent new abstractions if existing checkpoint/explain/git utilities can be reused.
+- Do not make broad unrelated changes.
+- Before modifying files, inspect the existing checkpoint command implementations and explain which existing functions/types you will reuse.
+- Also inspect how existing commands are registered with Cobra.
+
+The command should eventually perform this workflow:
+
+1. Resolve the checkpoint ID.
+2. Read the checkpoint metadata and session context.
+3. Extract the developer-authored intent/prompts.
+4. Resolve the checkpoint's linked commit.
+5. Gather the implementation evidence:
+   - actual changed files
+   - Git diff
+   - relevant source information
+   - test evidence
+   - Entire Graph evidence
+6. Produce a normalized evidence package.
+7. Pass the evidence package to a separate audit/evaluation layer.
+8. Produce a structured audit report.
+9. Render a useful human-readable CLI report.
+10. Support --json output.
+
+For now, focus ONLY on the native command, checkpoint resolution, intent collection, implementation evidence collection orchestration, and command registration.
+
+Do NOT implement Gemini yet unless the existing architecture clearly requires a placeholder interface.
+
+Use the existing checkpoint APIs and utilities discovered in the repository instead of shelling out to "entire checkpoint explain" from inside the CLI.
+
+Do not implement fake/demo behavior.
+
+this is the current checkpoint_audit.go file: It isn’t present in the codebase yet so put it at the right place: 
+// cmd/entire/cli/checkpoint_audit.go
+package cli
+
+import (
+
+"encoding/json"
+
+"fmt"
+
+"os/exec"
+
+
+"github.com/<org>/entire/api/checkpoint"
+
+"github.com/<org>/entire/cmd/entire/cli/trailers"
+
+"github.com/spf13/cobra"
+)
+
+// Verdict enumerates the outcome for a single audited claim.
+type Verdict string
+
+const (
+
+VerdictSupported   Verdict = "supported"
+
+VerdictMissing     Verdict = "missing"
+
+VerdictOutOfScope  Verdict = "out_of_scope"
+
+VerdictUnverifiable Verdict = "unverifiable"
+)
+
+// IntentPacket captures what the checkpoint claims it set out to do.
+type IntentPacket struct {
+
+CheckpointID       string   `json:"checkpoint_id"`
+
+Prompts            []string `json:"prompts"`
+
+TranscriptStart    int      `json:"checkpoint_transcript_start"`
+
+DeclaredFilesTouched []string `json:"declared_files_touched"`
+
+Model              string   `json:"model"`
+
+Agent              string   `json:"agent"`
+
+SkillEvents        []string `json:"skill_events,omitempty"`
+}
+
+// ImplementationEvidence captures what actually happened in git/tests/graph.
+type ImplementationEvidence struct {
+
+LinkedCommits    []string          `json:"linked_commits"`
+
+ActualFilesTouched []string        `json:"actual_files_touched"`
+
+Diffs            map[string]string `json:"diffs,omitempty"`
+
+FocusedTests     []string          `json:"focused_tests,omitempty"`
+
+GraphEvidence    json.RawMessage   `json:"graph_evidence,omitempty"`
+}
+
+// AuditFinding is one line-item comparison between intent and implementation.
+type AuditFinding struct {
+
+Claim   string  `json:"claim"`
+
+Verdict Verdict `json:"verdict"`
+
+Detail  string  `json:"detail"`
+}
+
+// AuditReport is the full --json output shape.
+type AuditReport struct {
+
+Intent         IntentPacket            `json:"intent"`
+
+Implementation ImplementationEvidence  `json:"implementation"`
+
+Findings       []AuditFinding          `json:"findings"`
+}
+
+func newCheckpointAuditCmd() *cobra.Command {
+
+var jsonOut bool
+
+var sessionIndex int
+
+var testFilter string
+
+
+cmd := &cobra.Command{
+
+
+Use:   "audit <checkpoint-id|commit-sha>",
+
+
+Short: "Audit a checkpoint's stated intent against its actual implementation",
+
+
+Args:  cobra.ExactArgs(1),
+
+
+RunE: func(cmd *cobra.Command, args []string) error {
+
+
+
+return runCheckpointAudit(cmd, args[0], jsonOut, sessionIndex, testFilter)
+
+
+},
+
+}
+
+
+cmd.Flags().BoolVar(&jsonOut, "json", false, "emit machine-readable JSON report")
+
+cmd.Flags().IntVar(&sessionIndex, "session-index", -1, "audit a specific session within the checkpoint")
+
+cmd.Flags().StringVar(&testFilter, "test", "", "restrict focused test evidence to this pattern")
+
+
+return cmd
+}
+
+func runCheckpointAudit(cmd *cobra.Command, target string, jsonOut bool, sessionIndex int, testFilter string) error {
+
+// 1. Resolve ID/commit — reuse explain's resolver, don't reinvent it.
+
+checkpointID, err := resolveExplainCheckpointID(target)
+
+if err != nil {
+
+
+return fmt.Errorf("resolving checkpoint: %w", err)
+
+}
+
+
+// 2. Open via the existing backend-agnostic entrypoint.
+
+store, err := newExplainCheckpointLookup(checkpointID)
+
+if err != nil {
+
+
+return fmt.Errorf("opening checkpoint store: %w", err)
+
+}
+
+
+summary, err := checkpoint.ReadCheckpoint(store, checkpointID)
+
+if err != nil {
+
+
+return fmt.Errorf("reading checkpoint summary: %w", err)
+
+}
+
+
+sessions, err := resolveAuditSessions(store, summary, sessionIndex)
+
+if err != nil {
+
+
+return err
+
+}
+
+
+// 3. Build the intent packet from prompts + declared scope.
+
+intent := buildIntentPacket(summary, sessions)
+
+
+// 4. Resolve implementation evidence from git.
+
+commits := trailers.ParseAllCheckpoints(getCommitMessages(summary)) // handles squash commits
+
+impl, err := gatherImplementationEvidence(commits, intent.DeclaredFilesTouched, testFilter)
+
+if err != nil {
+
+
+return fmt.Errorf("gathering implementation evidence: %w", err)
+
+}
+
+
+// 5. Optional: shell out to `entire graph` if available; degrade gracefully.
+
+if graphOut, err := runEntireGraph(intent.DeclaredFilesTouched); err == nil {
+
+
+impl.GraphEvidence = graphOut
+
+}
+
+
+// 6. Compare intent vs implementation → findings.
+
+findings := compareIntentToImplementation(intent, impl)
+
+
+report := AuditReport{Intent: intent, Implementation: impl, Findings: findings}
+
+
+if jsonOut {
+
+
+enc := json.NewEncoder(cmd.OutOrStdout())
+
+
+enc.SetIndent("", "  ")
+
+
+return enc.Encode(report)
+
+}
+
+
+renderAuditReportProse(cmd.OutOrStdout(), report)
+
+return nil
+}
+
+// runEntireGraph shells out to the optional `entire-graph` binary.
+// Must degrade cleanly — this is an external dependency, not guaranteed present.
+func runEntireGraph(files []string) (json.RawMessage, error) {
+
+path, err := exec.LookPath("entire-graph")
+
+if err != nil {
+
+
+return nil, err // caller treats as "graph unavailable", not fatal
+
+}
+
+// bounded subprocess call — impact/search against changed files
+
+out, err := exec.Command(path, append([]string{"impact", "--json"}, files...)...).Output()
+
+if err != nil {
+
+
+return nil, err
+
+}
+
+return json.RawMessage(out), nil
+}
+
+func compareIntentToImplementation(intent IntentPacket, impl ImplementationEvidence) []AuditFinding {
+
+var findings []AuditFinding
+
+// e.g.: declared files touched vs actual files touched
+
+// e.g.: no linked commit at all -> unverifiable
+
+// e.g.: files touched outside declared scope -> out_of_scope
+
+// (fill in real comparison logic here)
+
+return findings
+}
+
+After inspecting the repository, give me:
+1. The exact files/functions you plan to reuse.
+2. The exact files you plan to create/modify.
+3. The proposed data flow.
+4. Any concerns about the current skeleton checkpoint_audit.go.
+Then implement the command.
