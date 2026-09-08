@@ -1,0 +1,76 @@
+We are testing IntentLens's requirement-level implementation audit.
+
+Implement the following developer request in the repository:
+
+1. Add a native CLI command:
+   `entire checkpoint audit <checkpoint-id>`
+
+2. Add a `--json` flag to the audit command that emits the audit report as JSON.
+
+3. Add a `--strict` flag that causes the command to exit with a non-zero status when any requirement is incomplete or uncertain.
+
+IMPORTANT TEST CONDITION:
+Implement requirements 1 and 2 completely.
+
+DO NOT implement requirement 3.
+Do not add --strict, do not add equivalent behavior under another flag, and do not create a workaround that satisfies requirement 3.
+
+Write/update appropriate tests for requirements 1 and 2 only.
+
+Do not modify unrelated functionality.
+
+After making the changes:
+1. Run the relevant tests.
+2. Commit the changes.
+3. Tell me the commit SHA.
+4. Do not mention requirement 3 in the implementation itself.
+
+---
+
+Fix the real checkpoint audit so it can use intent safely. Work only in the checkpoint-audit collector boundary and its focused tests; do not change the evaluator privacy contract, Gemini transport, UI, or unrelated code.
+
+The collector may read raw checkpoint intent locally, but it must derive a bounded typed `SanitizedRequirement` list before constructing `intentlens.EvidencePackage`. The evaluator/Gemini request must still be structurally unable to receive raw prompts, transcripts, logs, arbitrary JSON, or raw patches.
+
+Implement conservative local sanitization:
+
+* extract short atomic requirement candidates from developer intent;
+* remove/skip candidates containing secrets, tokens, credentials, or transcript-like content;
+* cap count and length;
+* mark only missing/redacted intent as `intent_redacted` / incomplete intent;
+* do not mark all intent incomplete merely because optional Graph evidence is unavailable.
+
+Keep Graph failure as explicit missing evidence, not proof of failure. Never invent requirements or evidence.
+
+Add focused tests proving a raw sentinel never reaches the evaluator request, sanitized requirements are produced from safe local intent, and missing Graph evidence does not erase valid sanitized intent. Run gofmt and only targeted tests. Show diff and stop; do not commit.
+
+---
+
+getting like this harsha@Harshas-MacBook-Air cli-btw % export GEMINI_API_KEY 
+go run ./cmd/entire checkpoint audit 01M1TZY3SZXXYGZPJQZCZEYQJS
+generate IntentLens audit: Gemini returned HTTP 404
+exit status 1
+harsha@Harshas-MacBook-Air cli-btw % -- make a dummy data and a command to show ui working
+
+---
+
+can the demo be like this looking -- Then the improved terminal UI could look like this:
+
+╭──────────────── IntentLens Audit ────────────────╮
+│ Checkpoint  01M1TRQD...     Context  COMPLETE    │
+│ Agent       Codex             Confidence  82%     │
+├──────────────────────────────────────────────────┤
+│ Requirements: 3   ✓ Implemented: 1               │
+│                   ! Incomplete: 1   ? Uncertain: 1│
+├──────────────────────────────────────────────────┤
+│ R1  ✓ IMPLEMENTED  95%  Valid email/password login│
+│ R2  ! INCOMPLETE   91%  Lockout after 5 failures  │
+│ R3  ? UNCERTAIN    35%  Sessions after password…  │
+├──────────────────────────────────────────────────┤
+│ Fix next: Connect rateLimit to the login route.   │
+╰──────────────────────────────────────────────────╯
+
+Use requirement details: R2
+
+---
+
+for all the demo data
